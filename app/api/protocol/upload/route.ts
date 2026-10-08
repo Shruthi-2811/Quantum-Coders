@@ -24,20 +24,20 @@ export async function POST(request: Request) {
 
     console.log("PDF received:", file.name);
 
-    // 2. Extract text from PDF
+    // 2. Convert PDF to bytes
     const arrayBuffer = await file.arrayBuffer();
     const pdfData = new Uint8Array(arrayBuffer);
 
+    // 3. Read PDF
     const pdf = await getDocumentProxy(pdfData);
 
+    // 4. Extract text
     const extracted = await extractText(pdf, {
       mergePages: true,
     });
 
-    const extractedText =
-      typeof extracted.text === "string"
-        ? extracted.text
-        : extracted.text.join("\n");
+    // Fix for unpdf TypeScript issue
+    const extractedText = String(extracted.text ?? "");
 
     console.log(
       "PDF text extracted. Characters:",
@@ -46,25 +46,28 @@ export async function POST(request: Request) {
 
     if (!extractedText.trim()) {
       return NextResponse.json(
-        { error: "Could not extract text from the PDF." },
+        {
+          error:
+            "Could not extract text from the PDF. Please upload a text-based PDF.",
+        },
         { status: 400 }
       );
     }
 
-    // 3. Save trial
+    // 5. Create trial title
     const title = file.name.replace(/\.pdf$/i, "");
 
     console.log("Saving trial to Supabase...");
 
-    const { data: trial, error: trialError } =
-      await supabaseAdmin
-        .from("trials")
-        .insert({
-          title,
-          protocol_text: extractedText,
-        })
-        .select()
-        .single();
+    // 6. Save trial
+    const { data: trial, error: trialError } = await supabaseAdmin
+      .from("trials")
+      .insert({
+        title,
+        protocol_text: extractedText,
+      })
+      .select()
+      .single();
 
     if (trialError) {
       console.error("SUPABASE TRIAL ERROR:", trialError);
@@ -80,34 +83,32 @@ export async function POST(request: Request) {
 
     console.log("Trial created:", trial.id);
 
-    // 4. Extract inclusion/exclusion criteria locally
+    // 7. Extract inclusion/exclusion criteria
     const criteria = extractCriteria(extractedText);
 
-    console.log(
-      "Criteria extracted:",
-      criteria.length
-    );
+    console.log("Criteria extracted:", criteria.length);
 
     if (criteria.length === 0) {
       return NextResponse.json(
         {
           error:
             "The PDF was uploaded successfully, but no inclusion/exclusion criteria were found.",
+          trialId: trial.id,
         },
         { status: 400 }
       );
     }
 
-    // 5. Prepare database rows
+    // 8. Prepare criteria for database
     const criteriaRows = criteria.map((item) => ({
       trial_id: trial.id,
       criterion_type: item.type,
       criterion_text: item.text,
     }));
 
-    // 6. Save criteria
     console.log("Saving criteria to Supabase...");
 
+    // 9. Save criteria
     const { data: savedCriteria, error: criteriaError } =
       await supabaseAdmin
         .from("trial_criteria")
@@ -115,10 +116,7 @@ export async function POST(request: Request) {
         .select();
 
     if (criteriaError) {
-      console.error(
-        "SUPABASE CRITERIA ERROR:",
-        criteriaError
-      );
+      console.error("SUPABASE CRITERIA ERROR:", criteriaError);
 
       return NextResponse.json(
         {
@@ -134,7 +132,7 @@ export async function POST(request: Request) {
       savedCriteria?.length ?? 0
     );
 
-    // 7. Success
+    // 10. Return success
     return NextResponse.json({
       success: true,
       message: "Protocol processed successfully.",
@@ -159,11 +157,10 @@ export async function POST(request: Request) {
   }
 }
 
-
-// =====================================================
-// LOCAL CRITERIA EXTRACTION
-// =====================================================
-
+/**
+ * Extract inclusion and exclusion criteria
+ * from the text extracted from the PDF.
+ */
 function extractCriteria(text: string) {
   const results: {
     type: "inclusion" | "exclusion";
@@ -183,35 +180,35 @@ function extractCriteria(text: string) {
   for (const line of lines) {
     const lower = line.toLowerCase();
 
-    // Detect inclusion heading
+    // Detect Inclusion heading
     if (
       lower.includes("inclusion criteria") ||
-      lower === "inclusion"
+      lower === "inclusion" ||
+      lower.includes("inclusion")
     ) {
       currentType = "inclusion";
       continue;
     }
 
-    // Detect exclusion heading
+    // Detect Exclusion heading
     if (
       lower.includes("exclusion criteria") ||
-      lower === "exclusion"
+      lower === "exclusion" ||
+      lower.includes("exclusion")
     ) {
       currentType = "exclusion";
       continue;
     }
 
-    // Ignore lines before criteria sections
     if (!currentType) {
       continue;
     }
 
-    // Detect numbered criteria:
-    // 1. Age 18 or older
-    // 2. Patient has hypertension
-    // 3) Blood pressure...
+    // Numbered criteria:
+    // 1. Age >= 18
+    // 2) Diagnosis of hypertension
     const numberedMatch = line.match(
-      /^(?:\d+[\.\)]|[-•])\s*(.+)$/
+      /^(?:\d+[\.\)])\s*(.+)$/
     );
 
     if (numberedMatch) {
@@ -227,11 +224,10 @@ function extractCriteria(text: string) {
       continue;
     }
 
-    // Also accept bullet points
-    if (
-      line.startsWith("•") ||
-      line.startsWith("-")
-    ) {
+    // Bullet criteria:
+    // - Age >= 18
+    // • Diagnosis of hypertension
+    if (line.startsWith("•") || line.startsWith("-")) {
       const criterionText = line
         .replace(/^[-•]\s*/, "")
         .trim();
